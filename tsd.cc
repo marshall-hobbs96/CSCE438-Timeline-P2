@@ -44,6 +44,13 @@
 #include <unistd.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
+#include <errno.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <arpa/inet.h> 
 
 #include "sns.grpc.pb.h"
 
@@ -233,7 +240,7 @@ class SNSServiceImpl final : public SNSService::Service {
 };
 
 void RunServer(std::string port_no) {
-  std::string server_address = "0.0.0.0:"+port_no;
+  std::string server_address = "localhost:"+port_no;
   SNSServiceImpl service;
 
   ServerBuilder builder;
@@ -245,9 +252,47 @@ void RunServer(std::string port_no) {
   server->Wait();
 }
 
+void RunSlave(std::string port_no, pid_t master_pid) {
+
+  std::cout << "Listening on slave server" << std::endl << "Master PID: " << master_pid << std::endl;
+  pid_t child_pid = getpid();
+  std::cout << "Slave PID: " << child_pid << std::endl;
+  while(true) {
+
+    if(0 == kill(master_pid, 0)) {
+
+      //master server is fine, do nothing and keep waiting
+
+    }
+
+    else {  //Master server is down! we have to do something!!!
+
+      std::cout << "Master Server down, restarting..." << std::endl;
+      std::string arg = port_no;
+
+      char* argv[4];
+      argv[0] = "./tsd";
+      argv[1] = "-p";
+      strcpy(argv[2], arg.c_str());
+      argv[3] = NULL;
+      int err = execvp("./tsd", argv);
+
+      if(err == -1) {
+
+        std::cout << "Error restarting server!" << std::endl << strerror(errno) << std::endl;
+
+      }
+
+      std::cout << "Successfully restarted master, shutting down..." << std::endl;
+      return;
+
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   
-  std::string port = "3010";
+  std::string port = "16666";
   int opt = 0;
   while ((opt = getopt(argc, argv, "p:")) != -1){
     switch(opt) {
@@ -257,7 +302,94 @@ int main(int argc, char** argv) {
 	  std::cerr << "Invalid Command Line Argument\n";
     }
   }
-  RunServer(port);
+
+  pid_t pid;
+  pid_t master_pid = getpid();
+
+  int sockfd;
+  struct sockaddr_in serv_addr;
+  struct hostent *server;
+
+  int portno     = atoi(port.c_str());
+  char *hostname = "localhost";
+  server = gethostbyname(hostname);
+
+  
+  /*char hostname[1024];
+  hostname[1023] = '\0';
+  gethostname(hostname, 1023);*/
+  printf("Hostname: %s\n", hostname);
+  printf("h_name: %s\n", server->h_name);
+  char *IPbuffer;
+  IPbuffer = inet_ntoa(*((struct in_addr*) server->h_addr_list[0])); 
+  printf("Host IP: %s", IPbuffer); 
+
+  //server = gethostbyname(hostname);
+ 
+  sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd < 0) {
+    std::cout << "ERROR opening socket" << std::endl;
+  }
+ 
+  if (server == NULL) {
+    fprintf(stderr,"ERROR, no such host\n");
+    exit(0);
+  }
+ 
+  bzero((char *) &serv_addr, sizeof(serv_addr));
+  serv_addr.sin_family = AF_INET;
+  bcopy((char *)server->h_addr,
+        (char *)&serv_addr.sin_addr.s_addr,
+        server->h_length);
+  int open = -1; 
+
+  while((open == -1) && (portno < 16670)){
+
+    serv_addr.sin_port = htons(portno);
+
+    if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0) {
+
+      std::cout << "Port is closed" << std::endl;
+      open = 0;
+
+    } 
+
+    else {
+
+      std::cout << "Error: Port is active. Incrementing to next port" << std::endl;
+      portno++;
+      port = std::to_string(portno);
+      std::cout << portno << std::endl << port << std::endl;
+      open = -1;
+
+    }
+
+
+  }
+
+  close(sockfd);
+
+  if(portno > 16669) {
+
+    std::cout << "Error, already four (4) servers up. Cannot create new server instance. Exiting..." << std::endl;
+    exit(0);
+
+  }
+
+  pid = fork();
+
+  if(pid == 0){ //child process
+
+      RunSlave(port, master_pid);
+
+  }
+
+  else {  //master server. We should check if routing server is up. If it is, set up on next free port
+
+    RunServer(port);
+
+  }
+
 
   return 0;
 }
