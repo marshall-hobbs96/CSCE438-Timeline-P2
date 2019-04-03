@@ -19,6 +19,7 @@ using csce438::ListReply;
 using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
+using csce438::Regmessage;
 
 Message MakeMessage(const std::string& username, const std::string& msg) {
     Message m;
@@ -49,7 +50,8 @@ class Client : public IClient
         std::string port;
         // You can have an instance of the client stub
         // as a member variable.
-        std::unique_ptr<SNSService::Stub> stub_;
+        std::unique_ptr<SNSService::Stub> stub_;  //to master
+	std::unique_ptr<SNSService::Stub> stubR_; //to routing server
 
         IReply Login();
         IReply List();
@@ -97,16 +99,48 @@ int Client::connectTo()
     // a member variable in your own Client class.
     // Please refer to gRpc tutorial how to create a stub.
 	// ------------------------------------------------------------
+    //connect Routing server to get available master server information
     std::string login_info = hostname + ":" + port;
-    stub_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(
+    stubR_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(
                grpc::CreateChannel(
                     login_info, grpc::InsecureChannelCredentials())));
 
-    IReply ire = Login();
-    if(!ire.grpc_status.ok()) {
-        return -1;
-    }
-    return 1;
+    Reply reply;
+    Request request;
+    Regmessage regmsg;
+    request.set_username(username);
+   
+   
+    IReply ire;
+    while(1){
+       //std::cout<<"test"<<std::endl;
+       ClientContext context;
+       Status status = stubR_->Login(&context, request, &reply);
+       login_info = reply.hostname() + ":" + reply.port();
+       std::cout<<"try Connect to:" + login_info<<std::endl;
+    
+       if(login_info==":"){
+	   return -1;
+       }
+       else{
+       }
+       stub_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(
+           grpc::CreateChannel(login_info, grpc::InsecureChannelCredentials())));
+	  
+       ire = Login();
+	    
+       if(!ire.grpc_status.ok()) {
+          //Report the server is not available
+          ClientContext context1;
+          regmsg.set_hostname(reply.hostname());
+          regmsg.set_port(reply.port());
+	  stubR_->Report(&context1, regmsg, &reply);
+       }
+       else{
+            std::cout<<"Connect to:" + login_info<<std::endl;
+	    return 1;
+       }
+   }
 }
 
 IReply Client::processCommand(std::string& input)
@@ -250,13 +284,13 @@ IReply Client::Follow(const std::string& username2) {
 
     Status status = stub_->Follow(&context, request, &reply);
     IReply ire; ire.grpc_status = status;
-    if (reply.msg() == "unkown user name") {
+    if (reply.msg() == "Join Failed -- Invalid Username") {
         ire.comm_status = FAILURE_INVALID_USERNAME;
     } else if (reply.msg() == "unknown follower username") {
         ire.comm_status = FAILURE_INVALID_USERNAME;
-    } else if (reply.msg() == "you have already joined") {
+    } else if (reply.msg() == "Join Failed -- Already Following User") {
         ire.comm_status = FAILURE_ALREADY_EXISTS;
-    } else if (reply.msg() == "Follow Successful") {
+    } else if (reply.msg() == "Join Successful") {
         ire.comm_status = SUCCESS;
     } else {
         ire.comm_status = FAILURE_UNKNOWN;
@@ -277,11 +311,11 @@ IReply Client::UnFollow(const std::string& username2) {
     Status status = stub_->UnFollow(&context, request, &reply);
     IReply ire;
     ire.grpc_status = status;
-    if (reply.msg() == "unknown follower username") {
+    if (reply.msg() == "Leave Failed -- Invalid Username") {
         ire.comm_status = FAILURE_INVALID_USERNAME;
-    } else if (reply.msg() == "you are not follower") {
+    } else if (reply.msg() == "Leave Failed -- Not Following User") {
         ire.comm_status = FAILURE_INVALID_USERNAME;
-    } else if (reply.msg() == "UnFollow Successful") {
+    } else if (reply.msg() == "Leave Successful") {
         ire.comm_status = SUCCESS;
     } else {
         ire.comm_status = FAILURE_UNKNOWN;

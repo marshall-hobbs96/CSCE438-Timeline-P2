@@ -35,7 +35,7 @@
 
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/duration.pb.h>
-
+#include <sys/wait.h>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -44,15 +44,14 @@
 #include <unistd.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
-#include <errno.h>
-#include <stdio.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h> 
 
 #include "sns.grpc.pb.h"
+
+using grpc::Channel;
+using grpc::ClientContext;
+using grpc::ClientReader;
+using grpc::ClientReaderWriter;
+using grpc::ClientWriter;
 
 using google::protobuf::Timestamp;
 using google::protobuf::Duration;
@@ -68,6 +67,14 @@ using csce438::ListReply;
 using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
+using csce438::Regmessage;
+
+enum serverRole{
+  router,
+  master,
+  slave,
+  router_slave
+} role;
 
 struct Client {
   std::string username;
@@ -80,6 +87,13 @@ struct Client {
     return (username == c1.username);
   }
 };
+
+struct ServerInfo {
+  std::string hostname;
+  std::string port;
+  bool isAvailable;
+};
+std::vector<ServerInfo> server_db;
 
 //Vector that stores every client that has been created
 std::vector<Client> client_db;
@@ -95,8 +109,76 @@ int find_user(std::string username){
   return -1;
 }
 
+int find_server(std::string hostname, std::string port){
+  int index = 0;
+  for(ServerInfo s : server_db){
+    if(s.hostname == hostname && s.port == port)
+      return index;
+    index++;
+  }
+  return -1;
+}
+
+int find_server_available(){
+  int index = 0;
+  for(ServerInfo s : server_db){
+    if(s.isAvailable==true)
+      return index;
+    index++;
+  }
+  return -1;
+}
+
+
 class SNSServiceImpl final : public SNSService::Service {
+  //register
+  Status Register(ServerContext* context, const Regmessage* request, Reply* reply) override {
+
+    int index = find_server(request->hostname(),request->port());
+    if(index>=0){
+        ServerInfo server = server_db[index];
+        server.isAvailable = true;
+        std::cout<<request->hostname()<<":"<<request->port()<<" is availabe again"<<std::endl;
+    }
+    else{
+        ServerInfo server;
+        server.hostname = request->hostname();
+        server.port = request->port();
+        server.isAvailable = true;
+        server_db.push_back(server);
+        std::cout<<request->hostname()<<":"<<request->port()<<" is added."<<std::endl;
+    }
+    //index = find_server_available();
+    //if(index<0){
+    //   server.isAvailable = true;
+    //}
+    return Status::OK;
+  }
+  //report
+  Status Report(ServerContext* context, const Regmessage* request, Reply* reply) override {
+
+    int index = find_server(request->hostname(),request->port());
+    if(index>=0){
+        //ServerInfo server = server_db[index];
+        //server.isAvailable = false;
+        server_db[index].isAvailable = false;
+        //turn on next one to available
+        //for(int i = 0; i< server_db.size(); i++){
+        //  if(i!=index)
+        //  {
+        //    server_db[i].isAvailable = true;
+        //    break;
+        //  }
+        //}
+        std::cout<<request->hostname()<<":"<<request->port()<<" is unavailabe"<<std::endl;
+    }
   
+    return Status::OK;
+  }
+
+
+
+  //master
   Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
     Client user = client_db[find_user(request->username())];
     int index = 0;
@@ -151,22 +233,38 @@ class SNSServiceImpl final : public SNSService::Service {
   }
   
   Status Login(ServerContext* context, const Request* request, Reply* reply) override {
-    Client c;
-    std::string username = request->username();
-    int user_index = find_user(username);
-    if(user_index < 0){
-      c.username = username;
-      client_db.push_back(c);
-      reply->set_msg("Login Successful!");
+    if(role==router){
+        //std::string hostname,port;
+        //std::cout<<"DB size:"<<server_db.size()<<std::endl;
+        for(int i = 0; i< server_db.size(); i++){
+          if(server_db[i].isAvailable){
+            reply->set_msg("Login Successful!");
+            reply->set_hostname(server_db[i].hostname);
+            reply->set_port(server_db[i].port);
+            //std::cout<<server_db[i].hostname<<":"<<server_db[i].port<<" was routed"<<std::endl;
+            break;
+          }
+        }
+        
     }
-    else{ 
-      Client *user = &client_db[user_index];
-      if(user->connected)
-        reply->set_msg("Invalid Username");
-      else{
-        std::string msg = "Welcome Back " + user->username;
-	reply->set_msg(msg);
-        user->connected = true;
+    else{
+      Client c;
+      std::string username = request->username();
+      int user_index = find_user(username);
+      if(user_index < 0){
+        c.username = username;
+        client_db.push_back(c);
+        reply->set_msg("Login Successful!");
+      }
+      else{ 
+        Client *user = &client_db[user_index];
+        if(user->connected)
+          reply->set_msg("Invalid Username");
+        else{
+          std::string msg = "Welcome Back " + user->username;
+	        reply->set_msg(msg);
+          user->connected = true;
+        }
       }
     }
     return Status::OK;
@@ -239,10 +337,35 @@ class SNSServiceImpl final : public SNSService::Service {
 
 };
 
-void RunServer(std::string port_no) {
-  std::string server_address = "localhost:"+port_no;
+void RunRoutingServer(std::string hostname, std::string port_no) {
+  std::string server_address = hostname+":"+port_no;
   SNSServiceImpl service;
+  ServerBuilder builder;
+  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  builder.RegisterService(&service);
+  std::unique_ptr<Server> server(builder.BuildAndStart());
+  std::cout << "Server listening on " << server_address << std::endl;
 
+  //std::cout << "DB master Server: " << server_db.size() << std::endl;
+  server->Wait();
+}
+void RunMasterServer(std::string hostname, std::string port_no) {
+  std::string login_info = "localhost:3010";
+  std::unique_ptr<SNSService::Stub> stub_;
+  stub_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(
+               grpc::CreateChannel(
+                    login_info, grpc::InsecureChannelCredentials())));
+
+    Regmessage request;
+    request.set_hostname(hostname);
+    request.set_port(port_no);
+    Reply reply;
+    ClientContext context;
+
+    Status status = stub_->Register(&context, request, &reply);
+
+  std::string server_address = hostname+":"+port_no;
+  SNSServiceImpl service;
   ServerBuilder builder;
   builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
   builder.RegisterService(&service);
@@ -252,144 +375,83 @@ void RunServer(std::string port_no) {
   server->Wait();
 }
 
-void RunSlave(std::string port_no, pid_t master_pid) {
-
-  std::cout << "Listening on slave server" << std::endl << "Master PID: " << master_pid << std::endl;
-  pid_t child_pid = getpid();
-  std::cout << "Slave PID: " << child_pid << std::endl;
-  while(true) {
-
-    if(0 == kill(master_pid, 0)) {
-
-      //master server is fine, do nothing and keep waiting
-
-    }
-
-    else {  //Master server is down! we have to do something!!!
-
-      std::cout << "Master Server down, restarting..." << std::endl;
-      std::string arg = port_no;
-
-      char* argv[4];
-      argv[0] = "./tsd";
-      argv[1] = "-p";
-      strcpy(argv[2], arg.c_str());
-      argv[3] = NULL;
-      int err = execvp("./tsd", argv);
-
-      if(err == -1) {
-
-        std::cout << "Error restarting server!" << std::endl << strerror(errno) << std::endl;
-
-      }
-
-      std::cout << "Successfully restarted master, shutting down..." << std::endl;
-      return;
-
+void RunSlave(std::string hostname, std::string port_no){
+  std::string mode;
+  if(role==slave)
+    mode = "M";
+  else
+    mode = "R";
+  
+    pid_t c_pid, pid;
+    int status;
+    pid = getpid();
+    //std::cout << "pid in main: " <<pid << std::endl;
+    int s;
+    while(1){
+      //std::cout<<"process run again"<<std::endl;  
+      c_pid = fork();
+   
+      if( c_pid == 0 ){  
+	      pid = getpid();
+        //int rc = setsid();
+  
+	      char *const args[8] = {"tsd", "-p", (char*)port_no.c_str(),"-h",(char*)hostname.c_str(),"-r",(char*)mode.c_str(), NULL};
+	      //args[0]="tsd";
+	      execv("./tsd", args);
+     }
+     //std::cout<<"Monitor:"<<c_pid<<std::endl;
+     while (1)
+     {
+       int status;
+       s = waitpid(c_pid, &status, WNOHANG);
+       //cout<<"Monitor res" << s << "ID" << c_pid <<endl;
+       if(s!=0){
+         //Report to routing im not available
+         //cout<<"Monitor break"<<c_pid<<endl;
+          break;
+       }
     }
   }
 }
 
 int main(int argc, char** argv) {
   
-  std::string port = "16666";
+  std::string port = "3010";
+  std::string hostname = "localhost";
+  std::string mode="";
   int opt = 0;
-  while ((opt = getopt(argc, argv, "p:")) != -1){
+    
+  while ((opt = getopt(argc, argv, "p:h:r:")) != -1){
+     
     switch(opt) {
       case 'p':
           port = optarg;break;
+      case 'h':
+          hostname = optarg;break;
+      case 'r':
+          mode = optarg;break;
       default:
 	  std::cerr << "Invalid Command Line Argument\n";
     }
   }
-
-  pid_t pid;
-  pid_t master_pid = getpid();
-
-  int sockfd;
-  struct sockaddr_in serv_addr;
-  struct hostent *server;
-
-  int portno     = atoi(port.c_str());
-  char *hostname = "localhost";
-  server = gethostbyname(hostname);
-
-  
-  /*char hostname[1024];
-  hostname[1023] = '\0';
-  gethostname(hostname, 1023);*/
-  printf("Hostname: %s\n", hostname);
-  printf("h_name: %s\n", server->h_name);
-  char *IPbuffer;
-  IPbuffer = inet_ntoa(*((struct in_addr*) server->h_addr_list[0])); 
-  printf("Host IP: %s", IPbuffer); 
-
-  //server = gethostbyname(hostname);
- 
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    std::cout << "ERROR opening socket" << std::endl;
+   
+  if(mode=="R"){
+    role=router;
+    RunRoutingServer(hostname,port);
+  }
+  if(mode=="M"){
+    role=master;
+    RunMasterServer(hostname,port);
+  }
+  if(mode=="S"){
+    role=slave;
+    RunSlave(hostname,port);
+  }
+  if(mode=="Z"){
+    role=router_slave;
+    RunSlave(hostname,port);
   }
  
-  if (server == NULL) {
-    fprintf(stderr,"ERROR, no such host\n");
-    exit(0);
-  }
- 
-  bzero((char *) &serv_addr, sizeof(serv_addr));
-  serv_addr.sin_family = AF_INET;
-  bcopy((char *)server->h_addr,
-        (char *)&serv_addr.sin_addr.s_addr,
-        server->h_length);
-  int open = -1; 
-
-  while((open == -1) && (portno < 16670)){
-
-    serv_addr.sin_port = htons(portno);
-
-    if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0) {
-
-      std::cout << "Port is closed" << std::endl;
-      open = 0;
-
-    } 
-
-    else {
-
-      std::cout << "Error: Port is active. Incrementing to next port" << std::endl;
-      portno++;
-      port = std::to_string(portno);
-      std::cout << portno << std::endl << port << std::endl;
-      open = -1;
-
-    }
-
-
-  }
-
-  close(sockfd);
-
-  if(portno > 16669) {
-
-    std::cout << "Error, already four (4) servers up. Cannot create new server instance. Exiting..." << std::endl;
-    exit(0);
-
-  }
-
-  pid = fork();
-
-  if(pid == 0){ //child process
-
-      RunSlave(port, master_pid);
-
-  }
-
-  else {  //master server. We should check if routing server is up. If it is, set up on next free port
-
-    RunServer(port);
-
-  }
-
 
   return 0;
 }

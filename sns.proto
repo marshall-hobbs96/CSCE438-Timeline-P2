@@ -35,13 +35,15 @@ import "google/protobuf/timestamp.proto";
 
 // The messenger service definition.
 service SNSService{
-
+  rpc Register (Regmessage) returns (Reply) {}
+  rpc Report (Regmessage) returns (Reply) {}
   rpc Login (Request) returns (Reply) {}
   rpc List (Request) returns (ListReply) {}
   rpc Follow (Request) returns (Reply) {}
   rpc UnFollow (Request) returns (Reply) {}
   // Bidirectional streaming RPC
-  rpc Timeline (stream Message) returns (stream Message) {} 
+  rpc Timeline (stream Message) returns (stream Message) {}
+
 }
 
 message ListReply {
@@ -56,6 +58,14 @@ message Request {
 
 message Reply {
   string msg = 1;
+  string hostname = 2;
+  string port = 3;
+
+}
+
+message Regmessage {
+  string hostname = 1;
+  string port = 2;
 }
 
 message Message {

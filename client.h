@@ -65,7 +65,7 @@ class IClient
 
         void displayTitle() const;
         std::string getCommand() const;
-        void displayCommandReply(const std::string& comm, const IReply& reply) const;
+        void displayCommandReply(const std::string& comm, const IReply& reply) ;
         void toUpperCase(std::string& str) const;
 };
 
@@ -128,7 +128,7 @@ std::string IClient::getCommand() const
 	return input;
 }
 
-void IClient::displayCommandReply(const std::string& comm, const IReply& reply) const
+void IClient::displayCommandReply(const std::string& comm, const IReply& reply)  
 {
 	if (reply.grpc_status.ok()) {
 		switch (reply.comm_status) {
@@ -166,7 +166,8 @@ void IClient::displayCommandReply(const std::string& comm, const IReply& reply) 
 				break;
 		}
 	} else {
-		std::cout << "grpc failed: " << reply.grpc_status.error_message() << std::endl;
+		//std::cout << "grpc failed: " << reply.grpc_status.error_message() << std::endl;
+		int ret = connectTo();
 	}
 }
 
